@@ -1,80 +1,37 @@
-import type { AppLoadContext } from '@remix-run/cloudflare';
-import { RemixServer } from '@remix-run/react';
-import { isbot } from 'isbot';
-import { renderToReadableStream } from 'react-dom/server';
-import { renderHeadToString } from 'remix-island';
-import { Head } from './root';
-import { themeStore } from '~/lib/stores/theme';
+import type { CreateHandle } from "@remix-run/cloudflare";
+import { createRequestHandler } from "@remix-run/cloudflare";
+import * as build from "@remix-run/dev/server-build";
+import { execSync } from "node:child_process";
+import { promisify } from "node:util";
+import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
-export default async function handleRequest(
-  request: Request,
-  responseStatusCode: number,
-  responseHeaders: Headers,
-  remixContext: any,
-  _loadContext: AppLoadContext,
-) {
-  // await initializeModelList({});
+const handleRequest = createRequestHandler(build, process.env.NODE_ENV);
 
-  const readable = await renderToReadableStream(<RemixServer context={remixContext} url={request.url} />, {
-    signal: request.signal,
-    onError(error: unknown) {
-      console.error(error);
-      responseStatusCode = 500;
-    },
-  });
+const execPromisified = promisify(execSync);
 
-  const body = new ReadableStream({
-    start(controller) {
-      const head = renderHeadToString({ request, remixContext, Head });
-
-      controller.enqueue(
-        new Uint8Array(
-          new TextEncoder().encode(
-            `<!DOCTYPE html><html lang="en" data-theme="${themeStore.value}"><head>${head}</head><body><div id="root" class="w-full h-full">`,
-          ),
-        ),
-      );
-
-      const reader = readable.getReader();
-
-      function read() {
-        reader
-          .read()
-          .then(({ done, value }) => {
-            if (done) {
-              controller.enqueue(new Uint8Array(new TextEncoder().encode('</div></body></html>')));
-              controller.close();
-
-              return;
-            }
-
-            controller.enqueue(value);
-            read();
-          })
-          .catch((error) => {
-            controller.error(error);
-            readable.cancel();
-          });
+const handler: CreateHandle = {
+  async fetch(request, env, ctx) {
+    try {
+      const response = await handleRequest(request, env, ctx);
+      return response;
+    } catch (error) {
+      if (error instanceof Error) {
+        const errorMessage = error.message;
+        const repoDir = join(process.cwd(), "repo");
+        const gitInfo = await execPromisified(`git log -1 --pretty=format:"%H %s"`, {
+          cwd: repoDir,
+        });
+        const [commit, message] = gitInfo.stdout.trim().split(" ", 2);
+        const appVersion = readFileSync(join(repoDir, "app/version.txt"), "utf8").trim();
+        console.error(
+          `Error rendering ${request.url} (commit ${commit} "${message}", app version ${appVersion}):\n${errorMessage}`
+        );
       }
-      read();
-    },
+      console.error(error);
+      return new Response("Error rendering page", { status: 500 });
+    }
+  },
+};
 
-    cancel() {
-      readable.cancel();
-    },
-  });
-
-  if (isbot(request.headers.get('user-agent') || '')) {
-    await readable.allReady;
-  }
-
-  responseHeaders.set('Content-Type', 'text/html');
-
-  responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
-  responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
-
-  return new Response(body, {
-    headers: responseHeaders,
-    status: responseStatusCode,
-  });
-}
+export default handler;
