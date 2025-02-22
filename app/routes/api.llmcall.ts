@@ -7,6 +7,7 @@ import { MAX_TOKENS } from '~/lib/.server/llm/constants';
 import { LLMManager } from '~/lib/modules/llm/manager';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
+import { createScopedLogger } from '~/utils/logger';
 
 export async function action(args: ActionFunctionArgs) {
   return llmCallAction(args);
@@ -20,6 +21,8 @@ async function getModelList(options: {
   const llmManager = LLMManager.getInstance(import.meta.env);
   return llmManager.updateModelList(options);
 }
+
+const logger = createScopedLogger('api.llmcall');
 
 async function llmCallAction({ context, request }: ActionFunctionArgs) {
   const { system, message, model, provider, streamOutput } = await request.json<{
@@ -63,7 +66,7 @@ async function llmCallAction({ context, request }: ActionFunctionArgs) {
             content: `${message}`,
           },
         ],
-        env: context.cloudflare.env,
+        env: context.cloudflare?.env as any,
         apiKeys,
         providerSettings,
       });
@@ -91,7 +94,7 @@ async function llmCallAction({ context, request }: ActionFunctionArgs) {
     }
   } else {
     try {
-      const models = await getModelList({ apiKeys, providerSettings, serverEnv: context.cloudflare.env as any });
+      const models = await getModelList({ apiKeys, providerSettings, serverEnv: context.cloudflare?.env as any });
       const modelDetails = models.find((m: ModelInfo) => m.name === model);
 
       if (!modelDetails) {
@@ -106,6 +109,8 @@ async function llmCallAction({ context, request }: ActionFunctionArgs) {
         throw new Error('Provider not found');
       }
 
+      logger.info(`Generating response Provider: ${provider.name}, Model: ${modelDetails.name}`);
+
       const result = await generateText({
         system,
         messages: [
@@ -116,13 +121,14 @@ async function llmCallAction({ context, request }: ActionFunctionArgs) {
         ],
         model: providerInfo.getModelInstance({
           model: modelDetails.name,
-          serverEnv: context.cloudflare.env as any,
+          serverEnv: context.cloudflare?.env as any,
           apiKeys,
           providerSettings,
         }),
         maxTokens: dynamicMaxTokens,
         toolChoice: 'none',
       });
+      logger.info(`Generated response`);
 
       return new Response(JSON.stringify(result), {
         status: 200,
